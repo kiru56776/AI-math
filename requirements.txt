@@ -1,4 +1,5 @@
-pytelegrambotapi
-google-generativeai
+pyTelegramBotAPI
 firebase-admin
-python-dotenv
+requests
+gunicorn
+Flask
