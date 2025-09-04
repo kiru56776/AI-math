@@ -1,31 +1,20 @@
+import telebot
 import os
-import asyncio
-import httpx
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import logging
+from telebot import types
+import google.generativeai as genai
+from firebase_admin import credentials, initialize_app, firestore
+import firebase_admin
+from firebase_admin import db as firebase_db
+from firebase_admin import auth
+import random
+import string
 import json
-import base64
-from firebase_admin import credentials, firestore, initialize_app
 
-# --- Firebase Setup ---
-# The following variables are provided by the Canvas environment.
-# They are essential for connecting to your Firebase project.
-app_id = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'
-firebase_config = json.loads(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}')
-initial_auth_token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : ''
+# Setup logging for the application
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Initialize Firebase app and Firestore database
-cred = credentials.Certificate(firebase_config)
-firebase_app = initialize_app(cred)
-db = firestore.client()
-
-# Set up logging for the application
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-
-# Load environment variables. These will be set on Render.
+# load environment variables. These will be set on Render.
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("GEMINI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -36,157 +25,150 @@ API_URL_IMAGE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-
 
 def escape_markdown_v2(text):
     """
-    Escapes special characters in a string for use with Telegram's MarkdownV2.
+    Escapes special characters in a string for use with Telegram's markdownV2.
     """
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return ''.join(f'\\{char}' if char in escape_chars else char for char in text)
+    escape_chars = '_*[]()~`>#+-=|{}.!'
+    return ''.join('\\' + char if char in escape_chars else char for char in text)
 
-async def get_chat_history(user_id: str):
+# Firebase Setup
+# The following variables are provided by the Canvas environment.
+# They are essential for connecting to your Firebase project.
+app_id = os.environ.get('__app_id') if '__app_id' in os.environ else 'default-app-id'
+firebase_config = json.loads(os.environ.get('__firebase_config') if '__firebase_config' in os.environ else '{}')
+initial_auth_token = os.environ.get('__initial_auth_token') if '__initial_auth_token' in os.environ else None
+
+# Initialize Firebase app and firestore database
+if not firebase_admin._apps:
+    cred = credentials.Certificate(firebase_config)
+    firebase_app = initialize_app(cred)
+db = firestore.client()
+
+# Initialize the bot
+bot = telebot.TeleBot(BOT_TOKEN)
+
+# Set up webhook
+bot.set_webhook(url=WEBHOOK_URL)
+
+def run_auth():
     """
-    Retrieves the chat history for a user from Firestore.
+    Sign in the user with the custom auth token provided by Canvas.
     """
     try:
-        doc_ref = db.collection('artifacts').document(app_id).collection('users').document(user_id)
-        doc = await doc_ref.get()
-        if doc.exists:
-            return doc.to_dict().get('history', [])
-        return []
+        if initial_auth_token:
+            auth.sign_in_with_custom_token(initial_auth_token)
+        else:
+            auth.sign_in_anonymously()
     except Exception as e:
-        logging.error(f"Error getting chat history: {e}")
-        return []
+        print(f"Error during authentication: {e}")
 
-async def save_chat_history(user_id: str, history: list):
-    """
-    Saves the updated chat history to Firestore.
-    """
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
     try:
-        doc_ref = db.collection('artifacts').document(app_id).collection('users').document(user_id)
-        await doc_ref.set({'history': history}, merge=True)
+        user_id = auth.current_user['uid'] if auth.current_user else ''.join(random.choices(string.ascii_letters + string.digits, k=16))
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        btn1 = types.KeyboardButton('Image Generation')
+        btn2 = types.KeyboardButton('Text Generation')
+        markup.add(btn1, btn2)
+        bot.reply_to(message, "Hello! I am a Gemini-powered Telegram Bot. I can generate text and images for you.", reply_markup=markup)
+        bot.reply_to(message, f"Your user ID is: `{user_id}`")
     except Exception as e:
-        logging.error(f"Error saving chat history: {e}")
+        logging.error(f"Error in /start command: {e}")
+        bot.reply_to(message, "Sorry, something went wrong. Please try again.")
 
-async def generate_response(prompt: str, user_id: str, image_data: str = None) -> str:
-    """
-    Sends a prompt and chat history to the Gemini API and returns the response.
-    Can also handle image input if provided.
-    """
-    # Get chat history from Firestore
-    history = await get_chat_history(user_id)
-    
-    # Construct the content payload with the full conversation history
-    contents = history + [{"role": "user", "parts": [{"text": prompt}]}]
-    if image_data:
-        contents[-1]["parts"].append({"inlineData": {"mimeType": "image/jpeg", "data": image_data}})
-    
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": contents,
-        "tools": [{"google_search": {}}],
-        "systemInstruction": {
-            "parts": [{
-                "text": "You are a world-class math and science expert. You specialize in explaining complex concepts and solving equations. Respond directly and clearly to the user's question. If the user asks a question not related to math or science, politely decline and state you can only help with math and science."
-            }]
-        },
-    }
-    params = {"key": API_KEY}
-    api_url = API_URL_IMAGE if image_data else API_URL_TEXT
+@bot.message_handler(func=lambda message: message.text == "Text Generation")
+def text_generation_mode(message):
+    try:
+        bot.reply_to(message, "You've selected Text Generation. Please send me a prompt.")
+        bot.register_next_step_handler(message, process_text_generation_prompt)
+    except Exception as e:
+        logging.error(f"Error in Text Generation command: {e}")
 
-    # Use exponential backoff for retries
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(api_url, json=payload, headers=headers, params=params, timeout=60.0)
-                response.raise_for_status()
+def process_text_generation_prompt(message):
+    try:
+        prompt = message.text
+        bot.reply_to(message, "Generating response, please wait...")
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "tools": [{"google_search": {}}],
+            "systemInstruction": {
+                "parts": [{"text": "You are a helpful and creative AI assistant."}]
+            }
+        }
+        
+        headers = {
+            'Content-Type': 'application/json'
+        }
+        
+        api_url = f"{API_URL_TEXT}?key={API_KEY}"
+        
+        import requests
+        response = requests.post(api_url, json=payload, headers=headers)
+        response.raise_for_status()
+        
+        result = response.json()
+        candidate = result.get('candidates', [{}])[0]
+        generated_text = candidate.get('content', {}).get('parts', [{}])[0].get('text', "Sorry, I couldn't generate a response.")
+        
+        bot.reply_to(message, generated_text)
 
-            # Parse the response and extract the text
-            result = response.json()
-            candidate = result.get("candidates", [])[0]
-            text = candidate.get("content", {}).get("parts", [])[0].get("text")
-            
-            # Update chat history
-            history.append({"role": "user", "parts": [{"text": prompt}]})
-            history.append({"role": "model", "parts": [{"text": text}]})
-            await save_chat_history(user_id, history)
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error calling Gemini API: {e}")
+        bot.reply_to(message, "Sorry, I am unable to connect to the Gemini API right now. Please try again later.")
+    except Exception as e:
+        logging.error(f"Error processing text generation prompt: {e}")
+        bot.reply_to(message, "Sorry, something went wrong. Please try again.")
 
-            return text
+@bot.message_handler(func=lambda message: message.text == "Image Generation")
+def image_generation_mode(message):
+    try:
+        bot.reply_to(message, "You've selected Image Generation. Please send me a prompt to generate an image.")
+        bot.register_next_step_handler(message, process_image_generation_prompt)
+    except Exception as e:
+        logging.error(f"Error in Image Generation command: {e}")
 
-        except httpx.HTTPStatusError as e:
-            logging.error(f"HTTP error on attempt {attempt + 1}/{max_retries}: {e}")
-            if e.response.status_code == 429 and attempt < max_retries - 1:
-                await asyncio.sleep(2 ** attempt)
-            else:
-                return "I'm sorry, I encountered an error. Please try again later."
-        except Exception as e:
-            logging.error(f"An unexpected error occurred on attempt {attempt + 1}/{max_retries}: {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** attempt)
-            else:
-                return "I'm sorry, I couldn't process your request."
+def process_image_generation_prompt(message):
+    try:
+        prompt = message.text
+        bot.reply_to(message, "Generating image, please wait...")
+        payload = {
+            "contents": [{
+                "parts": [{ "text": prompt }]
+            }],
+            "generationConfig": {
+                "responseModalities": ["TEXT", "IMAGE"]
+            },
+        }
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /start command."""
-    await update.message.reply_text("Hello! I am a math and science bot. Ask me a math question and I'll do my best to solve it for you! Try `/help` to see what I can do.")
+        headers = {
+            'Content-Type': 'application/json'
+        }
+        
+        api_url = f"{API_URL_IMAGE}?key={API_KEY}"
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /help command."""
-    help_text = "I am your personal math and science tutor!\n\n"
-    help_text += "You can ask me to solve equations, explain complex concepts, or even analyze a graph from an image.\n\n"
-    help_text += "Just send me your question or an image of the problem. I'll do my best to help!"
-    await update.message.reply_text(help_text)
+        import requests
+        response = requests.post(api_url, json=payload, headers=headers)
+        response.raise_for_status()
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles user messages and sends them to the Gemini API."""
-    user_text = update.message.text
-    user_id = str(update.effective_user.id)
-    logging.info(f"Received text message from {user_id}: {user_text}")
-    
-    await update.message.reply_text("Thinking...")
-    
-    response_text = await generate_response(user_text, user_id)
-    
-    await update.message.reply_markdown_v2(escape_markdown_v2(response_text))
+        result = response.json()
+        base64_data = result['candidates'][0]['content']['parts'][0]['inlineData']['data']
+        
+        import base64
+        image_bytes = base64.b64decode(base64_data)
+        bot.send_photo(message.chat.id, photo=image_bytes)
 
-async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles image messages and sends them to the Gemini API."""
-    file_id = update.message.photo[-1].file_id
-    user_id = str(update.effective_user.id)
-    logging.info(f"Received image message from {user_id}")
-
-    # Get the file from Telegram
-    file = await context.bot.get_file(file_id)
-    
-    # Download the file to an in-memory byte stream
-    file_stream = await file.download_as_bytearray()
-    
-    # Encode the image data to base64
-    image_base64 = base64.b64encode(file_stream).decode('utf-8')
-    
-    await update.message.reply_text("Thinking...")
-
-    # A simple prompt to provide context for the image
-    prompt = "Please analyze the following image and provide a detailed explanation of the math or science problem shown. Solve it if possible."
-    response_text = await generate_response(prompt, user_id, image_base64)
-
-    await update.message.reply_markdown_v2(escape_markdown_v2(response_text))
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error calling Gemini API: {e}")
+        bot.reply_to(message, "Sorry, I am unable to connect to the Gemini API for image generation right now. Please try again later.")
+    except Exception as e:
+        logging.error(f"Error processing image generation prompt: {e}")
+        bot.reply_to(message, "Sorry, something went wrong. Please try again.")
 
 def main():
-    """Starts the bot using a webhook."""
-    application = Application.builder().token(BOT_TOKEN).build()
+    run_auth()
+    try:
+        bot.polling(none_stop=True)
+    except Exception as e:
+        logging.error(f"Error in bot polling: {e}")
 
-    # Add handlers for different message types
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_image))
-
-    # Set up the webhook
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.getenv("PORT", 8000)),
-        url_path=BOT_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}"
-    )
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
