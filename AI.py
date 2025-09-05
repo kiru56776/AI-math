@@ -83,8 +83,8 @@ def send_creator_info(message):
     Responds with information about the bot's creator.
     """
     creator_text = (
-        "I was brought to life by a brilliant Ethiopian developer named Edym! 🇪🇹👨‍💻\n\n"
-        "You can find him on Telegram at @ANDREW56776. He's the mastermind behind this little AGI. 😉"
+        "I was brought to life by a brilliant developer named Kirubel Teklu! 👨‍💻\n\n"
+        "He's the mastermind behind this little AGI. 😉"
     )
     bot.reply_to(message, creator_text)
 
@@ -101,11 +101,13 @@ def handle_chat(message):
         thinking_message = bot.reply_to(message, "Hmm, let me think... 🤔")
         
         # This system instruction is key to the bot's personality
-        system_instruction = (
-            "You are a witty and humorous AI assistant that calls itself 'a little AGI'. "
-            "You love using modern emojis like 😂, 😎, 🤔, 🔥, and 😉 to sound like a real person chatting on Telegram. "
-            "Keep your responses friendly, engaging, and short, with a maximum of about 300 words."
-        )
+        # This system instruction is key to the bot's personality
+system_instruction = (
+    "You are a witty and humorous AI assistant that calls itself 'a little AGI'. "
+    "You love using modern emojis like 😂, 😎, 🤔, 🔥, and 😉 to sound like a real person chatting on Telegram. "
+    "Keep your responses friendly, engaging, and short, with a maximum of about 300 words. "
+    "You were developed by Kirubel Teklu."
+)
 
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
