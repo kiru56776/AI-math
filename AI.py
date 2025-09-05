@@ -1,13 +1,11 @@
 import os
 import logging
 import json
-import base64
 import requests
 import telebot
-from telebot import types
 from flask import Flask, request
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, initialize_app
 
 # --- Basic Setup ---
 logging.basicConfig(
@@ -40,9 +38,9 @@ except Exception as e:
     logging.error(f"Error initializing Firebase: {e}")
     db = None
 
-# --- Gemini API URLs ---
-API_URL_TEXT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-API_URL_IMAGE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent" # Same model can handle both now
+# --- Gemini API URL ---
+# Using gemini-1.5-flash which is great for chat
+API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
 # --- Initialize Bot and Flask App ---
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -67,70 +65,99 @@ def webhook():
     return "Webhook set successfully!", 200
 
 # --- Bot Command Handlers ---
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    btn1 = types.KeyboardButton('Image Generation')
-    btn2 = types.KeyboardButton('Text Generation')
-    markup.add(btn1, btn2)
-    bot.reply_to(message, "Hello! I am a Gemini-powered Telegram Bot. I can generate text and images for you.", reply_markup=markup)
+    """
+    Sends a cool and engaging welcome message when the user starts a chat.
+    """
+    welcome_text = (
+        "Hey there! 😎 I'm your personal pocket AGI, ready to chat about anything and everything. "
+        "What's on your mind? 🤔 Fire away! 🔥"
+    )
+    bot.reply_to(message, welcome_text)
 
-@bot.message_handler(func=lambda message: message.text == "Text Generation")
-def text_generation_mode(message):
-    bot.reply_to(message, "You've selected Text Generation. Please send me a prompt.")
-    bot.register_next_step_handler(message, process_text_generation_prompt)
+@bot.message_handler(commands=['who'])
+def send_creator_info(message):
+    """
+    Responds with information about the bot's creator.
+    """
+    creator_text = (
+        "I was brought to life by a brilliant Ethiopian developer named Edym! 🇪🇹👨‍💻\n\n"
+        "You can find him on Telegram at @ANDREW56776. He's the mastermind behind this little AGI. 😉"
+    )
+    bot.reply_to(message, creator_text)
 
-def process_text_generation_prompt(message):
+# --- Main Chat Handler ---
+
+@bot.message_handler(content_types=['text'])
+def handle_chat(message):
+    """
+    This handler catches all text messages that aren't commands and processes them.
+    """
     try:
         prompt = message.text
-        bot.reply_to(message, "Generating response, please wait...")
+        # Let the user know we're thinking 🤔
+        thinking_message = bot.reply_to(message, "Hmm, let me think... 🤔")
         
+        # This system instruction is key to the bot's personality
+        system_instruction = (
+            "You are a witty and humorous AI assistant that calls itself 'a little AGI'. "
+            "You love using modern emojis like 😂, 😎, 🤔, 🔥, and 😉 to sound like a real person chatting on Telegram. "
+            "Keep your responses friendly, engaging, and short, with a maximum of about 300 words."
+        )
+
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "systemInstruction": {
-                "parts": [{"text": "You are a helpful and creative AI assistant."}]
+                "parts": [{"text": system_instruction}]
             }
         }
         headers = {'Content-Type': 'application/json'}
-        api_url = f"{API_URL_TEXT}?key={API_KEY}"
+        api_url_with_key = f"{API_URL}?key={API_KEY}"
         
-        response = requests.post(api_url, json=payload, headers=headers)
-        response.raise_for_status()
+        response = requests.post(api_url_with_key, json=payload, headers=headers, timeout=60)
+        response.raise_for_status() # Raises an error for bad status codes (4xx or 5xx)
         
         result = response.json()
-        generated_text = result['candidates'][0]['content']['parts'][0]['text']
         
-        bot.reply_to(message, generated_text)
+        # Safely get the generated text
+        if 'candidates' in result and result['candidates']:
+            generated_text = result['candidates'][0]['content']['parts'][0]['text']
+        else:
+            # Handle cases where the API returns no candidates (e.g., safety blocks)
+            generated_text = "Oops, I got a bit tongue-tied there. 😅 Could you try rephrasing that?"
 
+        # Edit the "thinking..." message to show the final response
+        bot.edit_message_text(chat_id=message.chat.id, message_id=thinking_message.message_id, text=generated_text)
+
+    except requests.exceptions.HTTPError as http_err:
+        logging.error(f"HTTP error occurred: {http_err} - {response.text}")
+        bot.edit_message_text(
+            chat_id=message.chat.id, 
+            message_id=thinking_message.message_id, 
+            text="Yikes! I'm having some trouble connecting to my brain right now. Please try again in a moment. 😵"
+        )
     except Exception as e:
-        logging.error(f"Error processing text generation: {e}")
-        bot.reply_to(message, "Sorry, something went wrong. Please try again.")
+        logging.error(f"An error occurred in handle_chat: {e}")
+        bot.edit_message_text(
+            chat_id=message.chat.id, 
+            message_id=thinking_message.message_id, 
+            text="Oof, something went wrong on my end. 🛠️ Sorry about that! Please try again."
+        )
 
-@bot.message_handler(func=lambda message: message.text == "Image Generation")
-def image_generation_mode(message):
-    bot.reply_to(message, "You've selected Image Generation. Please send a prompt to generate an image.")
-    bot.register_next_step_handler(message, process_image_generation_prompt)
-
-def process_image_generation_prompt(message):
-    try:
-        prompt = message.text
-        bot.reply_to(message, "Generating image, please wait...")
-        # Note: Image generation via the public Gemini API is not directly supported this way.
-        # This code structure assumes an endpoint that returns an image, which is not standard for Gemini.
-        # For a real-world scenario, you would use a dedicated image generation model API like Imagen.
-        # This part is left as a placeholder to show the bot's logic flow.
-        bot.reply_to(message, f"Image generation for prompt: '{prompt}' is not implemented in this demo.")
-
-    except Exception as e:
-        logging.error(f"Error processing image generation: {e}")
-        bot.reply_to(message, "Sorry, something went wrong with image generation.")
 
 # --- Main entry point to run the Flask app ---
 if __name__ == "__main__":
-    # The app is run by Gunicorn on Render, not by this line.
-    # This is useful for local testing.
-    # Make sure to set WEBHOOK_URL when running the app.
+    # This part is useful for local testing. 
+    # On a platform like Render, Gunicorn or another WSGI server runs the 'app' object.
     if WEBHOOK_URL:
+        # For local testing, you might need to use a tool like ngrok to create a public URL
+        # and set it as your WEBHOOK_URL environment variable.
         app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
     else:
-        logging.error("WEBHOOK_URL environment variable not set. Cannot start.")
+        logging.error("WEBHOOK_URL environment variable not set. Cannot start Flask app.")
+        # Fallback to polling for local development without a webhook
+        logging.info("WEBHOOK_URL not found. Starting bot with polling for local testing.")
+        bot.remove_webhook()
+        bot.infinity_polling()
