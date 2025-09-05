@@ -15,7 +15,7 @@ logging.basicConfig(
 
 # --- Load Environment Variables ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+AI_API_KEY = os.getenv("AI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 # --- Firebase Setup ---
@@ -35,8 +35,9 @@ except Exception as e:
     logging.error(f"Error initializing Firebase: {e}")
     db = None
 
-# --- DeepSeek API Configuration ---
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+# --- AI API Configuration ---
+# Using DeepSeek API but without branding in responses
+AI_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
 # --- Initialize Bot and Flask App ---
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -61,19 +62,29 @@ def webhook():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     welcome_text = (
-        "Hey there! 😎 I'm your personal pocket AI, powered by DeepSeek and developed by Kirubel Teklu. "
+        "Hey there! 😎 I'm your personal AI assistant, created by Kirubel Teklu. "
         "I'm ready to chat about anything and everything. "
-        "What's on your mind? 🤔 Fire away! 🔥"
+        "What's on your mind? 🤔 Fire away! 🔥\n\n"
+        "Contact my creator: @ANDREW56776"
     )
     bot.reply_to(message, welcome_text)
 
 @bot.message_handler(commands=['who'])
 def send_creator_info(message):
     creator_text = (
-        "I was brought to life by a brilliant Ethiopian developer named Kirubel Teklu! 🇪🇹👨‍💻\n\n"
+        "I was created by Kirubel Teklu! 🇪🇹👨‍💻\n\n"
+        "You can contact him on Telegram: @ANDREW56776\n\n"
         "He's the mastermind behind this AI assistant. 😉"
     )
     bot.reply_to(message, creator_text)
+
+@bot.message_handler(commands=['contact'])
+def send_contact_info(message):
+    contact_text = (
+        "Contact my creator Kirubel Teklu on Telegram: @ANDREW56776\n\n"
+        "He'd love to hear your feedback or answer any questions! 💬"
+    )
+    bot.reply_to(message, contact_text)
 
 # --- Main Chat Handler ---
 @bot.message_handler(content_types=['text'])
@@ -83,10 +94,11 @@ def handle_chat(message):
         thinking_message = bot.reply_to(message, "Hmm, let me think... 🤔")
         
         system_prompt = (
-            "You are a witty and humorous AI assistant. "
+            "You are a witty and humorous AI assistant created by Kirubel Teklu. "
             "You love using modern emojis like 😂, 😎, 🤔, 🔥, and 😉 to sound like a real person chatting on Telegram. "
             "Keep your responses friendly, engaging, and short, with a maximum of about 300 words. "
-            "You were developed by Kirubel Teklu."
+            "Never mention that you're powered by any specific AI model or company. "
+            "If asked about your creator, say you were developed by Kirubel Teklu and provide his Telegram @ANDREW56776."
         )
 
         payload = {
@@ -101,10 +113,10 @@ def handle_chat(message):
         
         headers = {
             'Content-Type': 'application/json',
-            'Authorization': f'Bearer {DEEPSEEK_API_KEY}'
+            'Authorization': f'Bearer {AI_API_KEY}'
         }
         
-        response = requests.post(DEEPSEEK_API_URL, json=payload, headers=headers, timeout=60)
+        response = requests.post(AI_API_URL, json=payload, headers=headers, timeout=60)
         response.raise_for_status()
         
         result = response.json()
